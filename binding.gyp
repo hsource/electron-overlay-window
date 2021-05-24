@@ -36,7 +36,18 @@
       	  'sources': [
             'src/lib/x11.c',
           ]
-      	}]
+      	}],
+        ['OS=="mac"', {
+          'link_settings': {
+            'libraries': [
+              '-lpthread', '-framework AppKit', '-framework ApplicationServices'
+            ]
+          },
+          'cflags': ['-std=c99', '-pedantic', '-Wall', '-pthread'],
+          'sources': [
+            'src/lib/mac.mm',
+          ]
+        }]
       ]
     }
   ]
