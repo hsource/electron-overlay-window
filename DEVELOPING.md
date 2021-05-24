@@ -1,3 +1,14 @@
+# Building and running code
+
+When developing, running `npm run demo:electron` or `yarn demo:electron`
+will build and run a demo app that's useful for testing this.
+
+# How this library works
+
+This library largely works by hooking into the event handlers so that the
+overlay window can be moved and shown/hidden to match the target window
+that it's supposed to overlay.
+
 # Code structure
 
 The main module exposes a singleton overlayWindow that can be used to control
@@ -14,11 +25,11 @@ On startup:
 ## Native module
 
 Immediately on attaching to a window, a background thread executes
-`hook_thread`.
+`hook_thread` (names for Mac are in camelCase, but otherwise similar).
 
 ## hook_thread
 
-`hook_thread` does the following:
+`hook_thread` does the following on Windows:
 
 - Hook foreground, minimize events for all windows
 - Hook foreground window rename and call `check_and_handle_window`
@@ -26,7 +37,7 @@ Immediately on attaching to a window, a background thread executes
 
 ## check_and_handle_window
 
-`check_and_handle_window` does the following:
+`check_and_handle_window` does the following on Windows:
 
 - Initialize `is_focused`, `is_destroyed`, and other properties on
   `target_info`
@@ -34,6 +45,5 @@ Immediately on attaching to a window, a background thread executes
 - Create hooks for window move and destroy
   - Cleans up any existing hooks before this
 - Attaches the target's input handling to the overlay's input handling
-- Place the overlay window
 - Make the overlay window have the other window as a parent
-  - Emit attach and focus
+- Emit attach and focus events
