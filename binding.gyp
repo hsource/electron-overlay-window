@@ -36,7 +36,7 @@
       	  'sources': [
             'src/lib/x11.c',
           ]
-      	}],
+        }],
         ['OS=="mac"', {
           'link_settings': {
             'libraries': [
