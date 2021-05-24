@@ -84,6 +84,22 @@ class OverlayWindow extends EventEmitter {
       }
     })
 
+    this.on('blur', () => {
+      if (this.defaultBehavior && process.platform === 'darwin') {
+        // Since we can't attach the window to a parent on Mac, we have to
+        // just hide it whenever the target is blurred to prevent it from
+        // covering up other apps
+        this._overlayWindow.hide()
+      }
+    })
+
+    this.on('focus', () => {
+      if (this.defaultBehavior && process.platform === 'darwin') {
+        // We show on focus, but only on Mac. See reasoning in the blur handler
+        this._overlayWindow.show()
+      }
+    })
+
     this.on('fullscreen', (e) => {
       if (this.defaultBehavior) {
         this._overlayWindow.setFullScreen(e.isFullscreen)
