@@ -17,37 +17,44 @@ static void checkAndHandleWindow(pid_t pid, AXUIElementRef frontmostWindow);
 
 struct ow_target_window {
   char *title;
+  /** Set to -1 if not initialized yet */
+  pid_t pid;
   /** Window matching the target title, or null */
   AXUIElementRef element;
   /** Observer that sends all observed events to hookProc */
   AXObserverRef observer;
   bool isFocused;
   bool isDestroyed;
-  bool isFullscreen;
 };
 
 struct ow_overlay_window {
-  NSView *view;
+  NSWindow *window;
 };
 
 struct ow_frontmost_app {
+  /** Set to -1 if not initialized */
   pid_t pid;
-  /** Latest application identified to be frontmost */
+  /** Set to 0 if not initialized */
+  CGWindowID windowID;
+  /** Latest application (not window) identified to be frontmost */
   AXUIElementRef element;
   /** Observer that sends all observed events to hookProc */
   AXObserverRef observer;
 };
 
+/**
+ * This should only be modified inside the checkAndHandleWindow
+ * function for more centralized logic.
+ */
 static struct ow_target_window targetInfo = {
     .title = NULL,
+    .pid = -1,
     .element = NULL,
     .observer = NULL,
     .isFocused = false,
-    .isDestroyed = false,
-    .isFullscreen = false // initial state of *overlay* window
 };
 
-static struct ow_overlay_window overlayInfo = {.view = NULL};
+static struct ow_overlay_window overlayInfo = {.window = NULL};
 
 /**
  * Unlike on Windows and Linux, we have no way to listen to all window
@@ -55,13 +62,24 @@ static struct ow_overlay_window overlayInfo = {.view = NULL};
  * foreground app changes, and recheck focus/frontmost when it does.
  */
 static struct ow_frontmost_app frontmostInfo = {
-    .pid = -1, .element = NULL, .observer = NULL};
+    .pid = -1, .windowID = 0, .element = NULL, .observer = NULL};
 
-/** We should emit move/resize events for these notification types */
+// Window notifications: these are attached to the target window
+static std::array<CFStringRef, 3> windowNotificationTypes = {
+    kAXUIElementDestroyedNotification,
+    kAXMovedNotification,
+    kAXResizedNotification,
+};
+static std::array<CFStringRef, 1> destroyNotificationTypes = {
+    kAXUIElementDestroyedNotification};
 static std::array<CFStringRef, 2> moveResizeNotificationTypes = {
     kAXMovedNotification, kAXResizedNotification};
-static std::array<CFStringRef, 2> focusNotificationTypes = {
-    kAXFocusedWindowChangedNotification, kAXApplicationDeactivatedNotification};
+
+// Applicaton notifications: these are attached to the foreground app
+static std::array<CFStringRef, 5> appFocusNotificationTypes = {
+    kAXFocusedWindowChangedNotification, kAXApplicationDeactivatedNotification,
+    kAXApplicationHiddenNotification, kAXMainWindowChangedNotification,
+    kAXWindowMiniaturizedNotification};
 
 bool requestAccessibility(bool showDialog) {
   NSDictionary *opts =
@@ -197,9 +215,32 @@ static void emitMoveResizeEvent(CGWindowID windowID) {
 }
 
 static void handleFocusEvent() {
-  pid_t pid = getFrontmostAppPID();
-  AXUIElementRef frontmostWindow = copyFrontmostWindow(pid);
-  checkAndHandleWindow(pid, frontmostWindow);
+  pid_t frontmostPID = -1;
+  AXUIElementRef frontmostWindow = NULL;
+  CGWindowID frontmostWindowID = 0;
+
+  pid_t prevFrontmostPID = frontmostInfo.pid;
+  CGWindowID prevFrontmostWindowID = frontmostInfo.windowID;
+
+  // Depending on timings, we might get the previous focused PID and window.
+  // Keep looping until we get something new
+  do {
+    if (frontmostPID != -1) {
+      // Sleep a bit before rechecking
+      [NSThread sleepForTimeInterval:0.1];
+      NSLog(@"handleFocusEvent: looping");
+    }
+    frontmostPID = getFrontmostAppPID();
+    frontmostWindow = copyFrontmostWindow(frontmostPID);
+    frontmostWindowID = getWindowID(frontmostWindow);
+  } while (prevFrontmostPID >= 0 && frontmostPID == prevFrontmostPID &&
+           frontmostWindowID == prevFrontmostWindowID);
+
+  checkAndHandleWindow(frontmostPID, frontmostWindow);
+
+  if (frontmostWindow) {
+    CFRelease(frontmostWindow);
+  }
 }
 
 /**
@@ -210,8 +251,7 @@ static void handleFocusEvent() {
 static void hookProc(AXObserverRef observer, AXUIElementRef element,
                      CFStringRef cfNotificationType, void *contextData) {
   NSString *notificationType = CFBridgingRelease(cfNotificationType);
-
-  NSLog(@"hookProc with notificationType: %@", notificationType);
+  NSLog(@"hookProc: processing for type %@", notificationType);
 
   // Handle move/resize events
   for (auto &moveResizeNotificationType : moveResizeNotificationTypes) {
@@ -222,10 +262,19 @@ static void hookProc(AXObserverRef observer, AXUIElementRef element,
     }
   }
 
-  // Handle move/resize events
-  for (auto &focusNotificationType : focusNotificationTypes) {
+  // Handle focus change events
+  for (auto &focusNotificationType : appFocusNotificationTypes) {
     if ([notificationType
             isEqualToString:(__bridge NSString *)focusNotificationType]) {
+      handleFocusEvent();
+    }
+  }
+
+  // Handle window being destroyed
+  for (auto &destroyNotificationType : destroyNotificationTypes) {
+    if ([notificationType
+            isEqualToString:(__bridge NSString *)destroyNotificationType]) {
+      targetInfo.isDestroyed = true;
       handleFocusEvent();
     }
   }
@@ -251,7 +300,7 @@ createObserver(pid_t pid, AXUIElementRef element,
   if (element) {
     for (auto &notificationType : notificationTypes) {
       AXObserverAddNotification(observer, element, notificationType, NULL);
-      NSLog(@"Creating observer for type: %@", notificationType);
+      // NSLog(@"createObserver: created for type %@", notificationType);
     }
   }
   CFRunLoopAddSource([[NSRunLoop currentRunLoop] getCFRunLoop],
@@ -282,11 +331,12 @@ static void removeObserver(AXObserverRef observer, AXUIElementRef element,
 }
 
 /**
- * Update the `frontmostInfo` if the `frontmostWindow` has changed.
+ * Clear the `windowInfo`, making sure to release memory of associated
+ * observers for the given `notificationTypes` and the window itself.
  */
 template <typename WindowInfo, std::size_t NotificationTypesSize>
-static void updateWindowInfo(
-    pid_t pid, AXUIElementRef element, WindowInfo &windowInfo,
+static void clearWindowInfo(
+    WindowInfo &windowInfo,
     std::array<CFStringRef, NotificationTypesSize> notificationTypes) {
   if (windowInfo.observer) {
     removeObserver(windowInfo.observer, windowInfo.element, notificationTypes);
@@ -298,6 +348,17 @@ static void updateWindowInfo(
     CFRelease(windowInfo.element);
     windowInfo.element = NULL;
   }
+}
+
+/**
+ * Clear and reinitialize the `windowInfo` object for the current element,
+ * including any observers for the `notificationTypes`.
+ */
+template <typename WindowInfo, std::size_t NotificationTypesSize>
+static void updateWindowInfo(
+    pid_t pid, AXUIElementRef element, WindowInfo &windowInfo,
+    std::array<CFStringRef, NotificationTypesSize> notificationTypes) {
+  clearWindowInfo(windowInfo, notificationTypes);
 
   windowInfo.element = element;
   CFRetain(windowInfo.element);
@@ -309,65 +370,75 @@ static void updateWindowInfo(
  * Called with the frontmost window and its PID.
  */
 static void checkAndHandleWindow(pid_t pid, AXUIElementRef frontmostWindow) {
-  CGWindowID windowID = getWindowID(frontmostWindow);
+  CGWindowID frontmostWindowID = getWindowID(frontmostWindow);
   CGWindowID targetWindowID = getWindowID(targetInfo.element);
+  CGWindowID overlayWindowID =
+      overlayInfo.window ? [overlayInfo.window windowNumber] : 0;
 
   // Emit blur/detach/focus if the frontmost window has changed
-  if (targetWindowID > 0) {
-    if (targetWindowID != windowID) {
-      if (targetInfo.isFocused) {
-        targetInfo.isFocused = false;
-        struct ow_event e = {.type = OW_BLUR};
-        ow_emit_event(&e);
-      }
+  // We count the target as focused even if the overlay is focused, since
+  // we don't want to hide the overlay when the user is using it
+  bool targetFocused = targetWindowID == frontmostWindowID;
 
-      if (targetInfo.isDestroyed) {
-        targetWindowID = 0;
-        targetInfo.isDestroyed = false;
-        struct ow_event e = {.type = OW_DETACH};
-        ow_emit_event(&e);
-      }
-    } else if (targetWindowID == windowID) {
-      if (!targetInfo.isFocused) {
-        targetInfo.isFocused = true;
-        struct ow_event e = {.type = OW_FOCUS};
-        ow_emit_event(&e);
-      }
-      return;
+  if (targetFocused && !targetInfo.isFocused) {
+    targetInfo.isFocused = true;
+    struct ow_event e = {.type = OW_FOCUS};
+    // NSLog(@"checkAndHandleWindow: focus");
+    ow_emit_event(&e);
+  } else if (!targetFocused && targetInfo.isFocused) {
+    if (targetInfo.isDestroyed || frontmostWindowID != overlayWindowID) {
+      targetInfo.isFocused = false;
+      struct ow_event e = {.type = OW_BLUR};
+      // NSLog(@"checkAndHandleWindow: blur");
+      ow_emit_event(&e);
+    }
+
+    if (targetInfo.isDestroyed) {
+      targetWindowID = 0;
+      targetInfo.isDestroyed = false;
+      struct ow_event e = {.type = OW_DETACH};
+      clearWindowInfo(targetInfo, windowNotificationTypes);
+      // NSLog(@"checkAndHandleWindow: detach");
+      ow_emit_event(&e);
     }
   }
 
+  frontmostInfo.windowID = frontmostWindowID;
+  // Ensure that the window focus/blur observers are attached to the foreground
+  // window at all times
   if (pid != frontmostInfo.pid) {
     frontmostInfo.pid = pid;
     AXUIElementRef application = AXUIElementCreateApplication(pid);
-    updateWindowInfo(pid, application, frontmostInfo, focusNotificationTypes);
+    updateWindowInfo(pid, application, frontmostInfo,
+                     appFocusNotificationTypes);
   }
 
   // For the rest of this function, only run if the title matches
   NSString *title = getTitleForWindow(frontmostWindow);
-  // if (!title || ![title isEqualToString: @(targetInfo.title)]) {
-  //   return;
-  // }
-
-  // The rest of the initialization/teardown logic only needs to be run
-  // if the target window has changed
-  if (targetWindowID == windowID) {
+  if (!title || ![title isEqualToString:@(targetInfo.title)]) {
     return;
   }
 
-  updateWindowInfo(pid, frontmostWindow, targetInfo,
-                   moveResizeNotificationTypes);
+  // The rest of the initialization/teardown logic only needs to be run
+  // if the target window has changed
+  if (targetWindowID == frontmostWindowID) {
+    return;
+  }
+
+  updateWindowInfo(pid, frontmostWindow, targetInfo, windowNotificationTypes);
 
   // Emit the attach and focus events
   struct ow_event e = {.type = OW_ATTACH,
                        .data.attach = {.has_access = -1, .is_fullscreen = -1}};
-  bool getBoundsSuccess = getBounds(windowID, &e.data.attach.bounds);
+  bool getBoundsSuccess = getBounds(frontmostWindowID, &e.data.attach.bounds);
   if (getBoundsSuccess) {
     // emit OW_ATTACH
     ow_emit_event(&e);
+    NSLog(@"checkAndHandleWindow: attach");
 
     targetInfo.isFocused = true;
     e.type = OW_FOCUS;
+    NSLog(@"checkAndHandleWindow: post-attach focus");
     ow_emit_event(&e);
   } else {
     // something went wrong, did the target window die right after becoming
@@ -384,7 +455,9 @@ static void hookThread(void *_arg) {
   pid_t pid = getFrontmostAppPID();
   AXUIElementRef frontmostWindow = copyFrontmostWindow(pid);
   checkAndHandleWindow(pid, frontmostWindow);
-  CFRelease(frontmostWindow);
+  if (frontmostWindow) {
+    CFRelease(frontmostWindow);
+  }
 
   // Start the RunLoop so that our AXObservers added by CFRunLoopAddSource
   // work properly
@@ -393,6 +466,29 @@ static void hookThread(void *_arg) {
 
 void ow_start_hook(char *target_window_title, void *overlay_window_id) {
   targetInfo.title = target_window_title;
-  overlayInfo.view = *static_cast<NSView **>(overlay_window_id);
+  NSView *overlayView = *static_cast<NSView **>(overlay_window_id);
+  NSWindow *overlayWindow = [overlayView window];
+  overlayInfo.window = overlayWindow;
+
+  // Have the overlay window be above everything else when it's visible
+  [overlayWindow setLevel:NSFloatingWindowLevel];
+  // Hide the shadow, so that we can hide the whole window using CSS
+  [overlayWindow setHasShadow:NO];
+
   uv_thread_create(&hook_tid, hookThread, NULL);
+}
+
+void ow_activate_overlay() {
+  [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+}
+
+void ow_focus_target() {
+  if (targetInfo.pid < 0 || !targetInfo.element) {
+    return;
+  }
+
+  AXUIElementRef app = AXUIElementCreateApplication(targetInfo.pid);
+  AXUIElementSetAttributeValue(app, kAXFrontmostAttribute, kCFBooleanTrue);
+  AXUIElementRef window = targetInfo.element;
+  AXUIElementSetAttributeValue(window, kAXFocusedAttribute, kCFBooleanTrue);
 }
