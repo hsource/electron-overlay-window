@@ -28,7 +28,7 @@ AXError _AXUIElementGetWindow(AXUIElementRef, CGWindowID *out);
 static void checkAndHandleWindow(pid_t pid, AXUIElementRef frontmostWindow);
 
 struct ow_target_window {
-  char *title;
+  const char *title;
   /** Set to -1 if not initialized yet */
   pid_t pid;
   /** Window matching the target title, or null */
@@ -77,17 +77,12 @@ static struct ow_frontmost_app frontmostInfo = {
     .pid = -1, .windowID = 0, .element = NULL, .observer = NULL};
 
 // Window notifications: these are attached to the target window
-static std::array<CFStringRef, 3> windowNotificationTypes = {
-    kAXUIElementDestroyedNotification,
-    kAXMovedNotification,
-    kAXResizedNotification,
-};
-static std::array<CFStringRef, 1> destroyNotificationTypes = {
-    kAXUIElementDestroyedNotification};
-static std::array<CFStringRef, 2> moveResizeNotificationTypes = {
-    kAXMovedNotification, kAXResizedNotification};
+static std::array<CFStringRef, 4> windowNotificationTypes = {
+    kAXUIElementDestroyedNotification, kAXMovedNotification,
+    kAXResizedNotification, kAXTitleChangedNotification};
 
-// Applicaton notifications: these are attached to the foreground app
+// Applicaton notifications: these are attached to the foreground (not
+// necessarily the target) app
 static std::array<CFStringRef, 5> appFocusNotificationTypes = {
     kAXFocusedWindowChangedNotification, kAXApplicationDeactivatedNotification,
     kAXApplicationHiddenNotification, kAXMainWindowChangedNotification,
@@ -265,7 +260,8 @@ static void hookProcTargetWindow(AXObserverRef observer, AXUIElementRef element,
   // NSLog(@"hookProcTargetWindow: processing for type %@", notificationType);
 
   // Handle move/resize events
-  for (auto &moveResizeNotificationType : moveResizeNotificationTypes) {
+  for (auto &moveResizeNotificationType :
+       {kAXMovedNotification, kAXResizedNotification}) {
     if ([notificationType
             isEqualToString:(__bridge NSString *)moveResizeNotificationType]) {
       CGWindowID windowID = getWindowID(element);
@@ -273,12 +269,20 @@ static void hookProcTargetWindow(AXObserverRef observer, AXUIElementRef element,
     }
   }
 
-  // Handle focus change events
-  for (auto &destroyNotificationType : destroyNotificationTypes) {
-    if ([notificationType
-            isEqualToString:(__bridge NSString *)destroyNotificationType]) {
-      targetInfo.isDestroyed = true;
-      handleFocusMaybeChanged();
+  // Handle destroy
+  if ([notificationType
+          isEqualToString:(__bridge NSString *)
+                              kAXUIElementDestroyedNotification]) {
+    targetInfo.isDestroyed = true;
+    handleFocusMaybeChanged();
+  }
+
+  // Handle title change
+  if ([notificationType
+          isEqualToString:(__bridge NSString *)kAXTitleChangedNotification]) {
+    NSString *title = getTitleForWindow(element);
+    if (title) {
+      targetInfo.title = [title UTF8String];
     }
   }
 }
@@ -461,6 +465,7 @@ static void checkAndHandleWindow(pid_t pid, AXUIElementRef frontmostWindow) {
     return;
   }
 
+  targetInfo.pid = pid;
   updateWindowInfo(pid, frontmostWindow, targetInfo, windowNotificationTypes,
                    /* isTargetWindow */ true);
 
@@ -541,5 +546,5 @@ void ow_focus_target() {
   AXUIElementRef app = AXUIElementCreateApplication(targetInfo.pid);
   AXUIElementSetAttributeValue(app, kAXFrontmostAttribute, kCFBooleanTrue);
   AXUIElementRef window = targetInfo.element;
-  AXUIElementSetAttributeValue(window, kAXFocusedAttribute, kCFBooleanTrue);
+  AXUIElementSetAttributeValue(window, kAXMainAttribute, kCFBooleanTrue);
 }

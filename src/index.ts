@@ -97,6 +97,9 @@ class OverlayWindow extends EventEmitter {
       if (this.defaultBehavior && process.platform === 'darwin') {
         // We show on focus, but only on Mac. See reasoning in the blur handler
         this._overlayWindow.show()
+        // Showing the window will focus the overlay. We don't want to take over
+        // control from the target, so we immediately refocus the target
+        process.nextTick(() => this.focusTarget())
       }
     })
 
