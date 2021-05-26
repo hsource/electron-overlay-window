@@ -5,6 +5,9 @@
 #import <array>
 
 /**
+ * FORMATTING: This file was formatted automatically with clang-format.
+ * We recommend formatting with clang-format before commiting updates.
+ *
  * This file handles the overlay window for Mac. It:
  *
  * 1. Uses the accessibility API, creates two sets of listeners
