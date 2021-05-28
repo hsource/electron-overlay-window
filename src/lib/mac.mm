@@ -244,9 +244,9 @@ static void hookProcFrontmostApplication(AXObserverRef observer,
                                          AXUIElementRef element,
                                          CFStringRef cfNotificationType,
                                          void *contextData) {
-  NSString *notificationType = (__bridge NSString *)cfNotificationType;
-  NSLog(@"hookProcFrontmostApplication: processing for type %@",
-        notificationType);
+  // NSString *notificationType = (__bridge NSString *)cfNotificationType;
+  // NSLog(@"hookProcFrontmostApplication: processing for type %@",
+  //       notificationType);
 
   handleFocusMaybeChanged();
 }
