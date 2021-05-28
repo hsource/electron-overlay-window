@@ -2,7 +2,7 @@ import { EventEmitter } from 'events'
 import { join } from 'path'
 import { throttle } from 'throttle-debounce'
 import { screen } from 'electron'
-import type { BrowserWindow, Rectangle } from 'electron'
+import type { BrowserWindow, Rectangle, BrowserWindowConstructorOptions } from 'electron'
 const lib: AddonExports = require('node-gyp-build')(join(__dirname, '..'))
 
 interface AddonExports {
@@ -54,19 +54,25 @@ declare interface OverlayWindow {
   on(event: 'moveresize', listener: (e: MoveresizeEvent) => void): this
 }
 
+const isMac = process.platform === 'darwin';
+
 class OverlayWindow extends EventEmitter {
   private _overlayWindow!: BrowserWindow
   public defaultBehavior = true
   private lastBounds: Rectangle = { x: 0, y: 0, width: 0, height: 0 }
 
-  readonly WINDOW_OPTS = {
+  readonly WINDOW_OPTS: BrowserWindowConstructorOptions = {
     fullscreenable: true,
     skipTaskbar: true,
     frame: false,
     show: false,
     transparent: true,
     // let Chromium to accept any size changes from OS
-    resizable: true
+    resizable: true,
+    // disable shadow for Mac OS
+    hasShadow: false,
+    // float above all windows on Mac OS
+    alwaysOnTop: isMac
   } as const
   
   constructor () {
@@ -76,8 +82,11 @@ class OverlayWindow extends EventEmitter {
       if (this.defaultBehavior) {
         // linux: important to show window first before changing fullscreen
         this._overlayWindow.showInactive()
+        if (isMac) {
+          this._overlayWindow.setVisibleOnAllWorkspaces(e.isFullscreen || false, { visibleOnFullScreen: true })
+        }
         if (e.isFullscreen !== undefined) {
-          this._overlayWindow.setFullScreen(e.isFullscreen)
+          this.handleFullscreen(e.isFullscreen)
         }
         this.lastBounds = e
         this.updateOverlayBounds()
@@ -105,7 +114,7 @@ class OverlayWindow extends EventEmitter {
 
     this.on('fullscreen', (e) => {
       if (this.defaultBehavior) {
-        this._overlayWindow.setFullScreen(e.isFullscreen)
+        this.handleFullscreen(e.isFullscreen)
       }
     })
 
@@ -121,6 +130,25 @@ class OverlayWindow extends EventEmitter {
       this.lastBounds = e
       dispatchMoveresize()
     })
+  }
+
+  private async handleFullscreen(isFullscreen: boolean) {
+    if (isMac) {
+      // On Mac, only a single app can be fullscreen, so we can't go
+      // fullscreen. We get around it by making it display on all workspaces,
+      // based on code from:
+      // https://github.com/electron/electron/issues/10078#issuecomment-754105005
+      this._overlayWindow.setVisibleOnAllWorkspaces(isFullscreen, { visibleOnFullScreen: true })
+      if (isFullscreen) {
+        const display = screen.getPrimaryDisplay()
+        this._overlayWindow.setBounds(display.bounds)
+      } else {
+        // Set it back to `lastBounds` as set before fullscreen
+        this.updateOverlayBounds();
+      }
+    } else {
+      this._overlayWindow.setFullScreen(isFullscreen)
+    }
   }
 
   private updateOverlayBounds () {

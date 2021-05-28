@@ -1,3 +1,4 @@
+#import "mac/OWFullscreenObserver.h"
 #include "overlay_window.h"
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
@@ -40,6 +41,7 @@ struct ow_target_window {
   AXObserverRef observer;
   bool isFocused;
   bool isDestroyed;
+  bool isFullscreen;
 };
 
 struct ow_overlay_window {
@@ -67,6 +69,7 @@ static struct ow_target_window targetInfo = {
     .element = NULL,
     .observer = NULL,
     .isFocused = false,
+    .isFullscreen = false,
 };
 
 static struct ow_overlay_window overlayInfo = {.window = NULL};
@@ -79,7 +82,10 @@ static struct ow_overlay_window overlayInfo = {.window = NULL};
 static struct ow_frontmost_app frontmostInfo = {
     .pid = -1, .windowID = 0, .element = NULL, .observer = NULL};
 
-// Window notifications: these are attached to the target window
+static OWFullscreenObserver *fullscreenObserver = NULL;
+
+// Window notifications: these are attached to the target window.
+// These must be handled by `hookProcTargetWindow`.
 static std::array<CFStringRef, 4> windowNotificationTypes = {
     kAXUIElementDestroyedNotification, kAXMovedNotification,
     kAXResizedNotification, kAXTitleChangedNotification};
@@ -150,25 +156,17 @@ static NSString *getTitleForWindow(AXUIElementRef window) {
  * https://github.com/sentialx/node-window-manager/blob/v2.2.0/lib/macos.mm#L25
  */
 static NSDictionary *getWindowInfo(CGWindowID windowID) {
-  CGWindowListOption listOptions =
-      kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
-  CFArrayRef windowList =
-      CGWindowListCopyWindowInfo(listOptions, kCGNullWindowID);
+  NSArray *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(
+      kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+      kCGNullWindowID));
 
-  for (NSDictionary *info in (__bridge NSArray *)windowList) {
+  for (NSDictionary *info in windows) {
     NSNumber *windowNumber = info[(id)kCGWindowNumber];
-
     if ([windowNumber intValue] == (int)windowID) {
-      // Retain property list so it doesn't get release w. windowList
-      CFRetain((CFPropertyListRef)info);
-      CFRelease(windowList);
       return info;
     }
   }
 
-  if (windowList) {
-    CFRelease(windowList);
-  }
   return NULL;
 }
 
@@ -208,7 +206,6 @@ static bool getBounds(CGWindowID windowID, ow_window_bounds *outputBounds) {
 }
 
 static void emitMoveResizeEvent(CGWindowID windowID) {
-  struct ow_window_bounds bounds;
   if (!targetInfo.element) {
     return;
   }
@@ -217,6 +214,7 @@ static void emitMoveResizeEvent(CGWindowID windowID) {
     return;
   }
 
+  struct ow_window_bounds bounds;
   if (getBounds(windowID, &bounds)) {
     struct ow_event e = {.type = OW_MOVERESIZE,
                          .data.moveresize = {.bounds = bounds}};
@@ -246,9 +244,9 @@ static void hookProcFrontmostApplication(AXObserverRef observer,
                                          AXUIElementRef element,
                                          CFStringRef cfNotificationType,
                                          void *contextData) {
-  // NSString *notificationType = CFBridgingRelease(cfNotificationType);
-  // NSLog(@"hookProcFrontmostApplication: processing for type %@",
-  // notificationType);
+  NSString *notificationType = (__bridge NSString *)cfNotificationType;
+  NSLog(@"hookProcFrontmostApplication: processing for type %@",
+        notificationType);
 
   handleFocusMaybeChanged();
 }
@@ -288,6 +286,29 @@ static void hookProcTargetWindow(AXObserverRef observer, AXUIElementRef element,
       targetInfo.title = [title UTF8String];
     }
   }
+}
+
+/**
+ * Checks whether the system is currently full-screen. From logic in this
+ * StackOverflow answer.
+ *
+ * https://stackoverflow.com/questions/23896803/os-x-detecting-when-front-app-goes-into-fullscreen-mode
+ */
+static bool isFullscreen() {
+  NSArray *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(
+      kCGWindowListOptionOnScreenOnly, kCGNullWindowID));
+
+  for (NSDictionary *info in windows) {
+    // Based on logic from
+    // https://stackoverflow.com/questions/23896803/os-x-detecting-when-front-app-goes-into-fullscreen-mode
+    // In full-screen, very few windows are present. We return that it's
+    // full-screen only if no SystemUIServer windows are present.
+    if ([info[@"kCGWindowOwnerName"] isEqualToString:@"SystemUIServer"]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**
@@ -445,6 +466,16 @@ static void checkAndHandleWindow(pid_t pid, AXUIElementRef frontmostWindow) {
     }
   }
 
+  // Emit fullscreen event
+  bool fullscreen = isFullscreen();
+  if (fullscreen != targetInfo.isFullscreen) {
+    targetInfo.isFullscreen = fullscreen;
+    struct ow_event e = {.type = OW_FULLSCREEN,
+                         .data.fullscreen = {.is_fullscreen = fullscreen}};
+    // NSLog(@"checkAndHandleWindow: fullscreen");
+    ow_emit_event(&e);
+  }
+
   frontmostInfo.windowID = frontmostWindowID;
   // Ensure that the window focus/blur observers are attached to the foreground
   // window at all times
@@ -473,8 +504,10 @@ static void checkAndHandleWindow(pid_t pid, AXUIElementRef frontmostWindow) {
                    /* isTargetWindow */ true);
 
   // Emit the attach and focus events
-  struct ow_event e = {.type = OW_ATTACH,
-                       .data.attach = {.has_access = -1, .is_fullscreen = -1}};
+  struct ow_event e = {
+      .type = OW_ATTACH,
+      // has_access is set to -1 for undefined
+      .data.attach = {.has_access = -1, .is_fullscreen = fullscreen}};
   bool getBoundsSuccess = getBounds(frontmostWindowID, &e.data.attach.bounds);
   if (getBoundsSuccess) {
     // emit OW_ATTACH
@@ -497,7 +530,7 @@ static void checkAndHandleWindow(pid_t pid, AXUIElementRef frontmostWindow) {
  */
 static void waitUntilAccessibilityGranted() {
   NSString *trustedCheckOptionPromptKey =
-      (__bridge NSString *)(kAXTrustedCheckOptionPrompt);
+      (__bridge NSString *)kAXTrustedCheckOptionPrompt;
   bool trusted = AXIsProcessTrustedWithOptions(static_cast<CFDictionaryRef>(
       @{trustedCheckOptionPromptKey : @YES}));
   // NSLog(@"waitUntilAccessibilityGranted: initial %d", trusted);
@@ -511,10 +544,45 @@ static void waitUntilAccessibilityGranted() {
 }
 
 /**
+ * Create an observer that calls `handleFocusMaybeChanged` when the
+ * app goes in/out of fullscreen. Based on code from:
+ * https://stackoverflow.com/a/23899517/319066
+ */
+static void observeFullscreen() {
+  if (fullscreenObserver) {
+    return;
+  }
+
+  NSApplication *app = [NSApplication sharedApplication];
+  fullscreenObserver = [OWFullscreenObserver alloc];
+
+  void (^onPossibleFullscreen)(void) = ^() {
+    handleFocusMaybeChanged();
+  };
+  [fullscreenObserver addBlock:onPossibleFullscreen];
+
+  // Observe full screen mode from apps setting SystemUIMode
+  // or invoking 'setPresentationOptions'
+  [app addObserver:fullscreenObserver
+        forKeyPath:@"currentSystemPresentationOptions"
+           options:NSKeyValueObservingOptionNew
+           context:NULL];
+
+  [[[NSWorkspace sharedWorkspace] notificationCenter]
+      addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification
+                  object:NULL
+                   queue:NULL
+              usingBlock:^(NSNotification *note) {
+                handleFocusMaybeChanged();
+              }];
+}
+
+/**
  * Initializes listeners for the frontmost window, and then starts the event
  * loop.
  */
 static void hookThread(void *_arg) {
+  observeFullscreen();
   waitUntilAccessibilityGranted();
   handleFocusMaybeChanged();
 
@@ -525,14 +593,10 @@ static void hookThread(void *_arg) {
 
 void ow_start_hook(char *target_window_title, void *overlay_window_id) {
   targetInfo.title = target_window_title;
+  // Cast to a weak pointer to avoid taking ownership of the view
   NSView *overlayView = *(NSView * __weak *)(overlay_window_id);
   NSWindow *overlayWindow = [overlayView window];
   overlayInfo.window = overlayWindow;
-
-  // Have the overlay window be above everything else when it's visible
-  [overlayWindow setLevel:NSFloatingWindowLevel];
-  // Hide the shadow, so that we can hide the whole window using CSS
-  [overlayWindow setHasShadow:NO];
 
   uv_thread_create(&hook_tid, hookThread, NULL);
 }

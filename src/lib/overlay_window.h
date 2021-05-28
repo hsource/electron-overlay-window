@@ -18,7 +18,7 @@ enum ow_event_type {
   // target window is destroyed
   OW_DETACH,
   // target window fullscreen changed
-  // only emitted on X11 backend
+  // only emitted on X11 and Mac backend
   OW_FULLSCREEN,
   // target window changed position or resized
   OW_MOVERESIZE,

@@ -51,6 +51,7 @@
           'cflags': ['-std=c99', '-pedantic', '-Wall', '-pthread'],
           'sources': [
             'src/lib/mac.mm',
+            'src/lib/mac/OWFullscreenObserver.mm'
           ]
         }]
       ]
