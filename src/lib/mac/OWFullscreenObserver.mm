@@ -2,6 +2,9 @@
 //  OWFullscreenObserver.m
 //  electronoverlaywindow
 //
+//  Thin wrapper to allow for registering an observer for when the window
+//  becomes full-screen.
+//
 //  Created by Harry Yu on 5/27/21.
 //
 
