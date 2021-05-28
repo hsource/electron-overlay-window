@@ -93,7 +93,7 @@ static std::array<CFStringRef, 5> appFocusNotificationTypes = {
 
 bool requestAccessibility(bool showDialog) {
   NSDictionary *opts =
-      @{static_cast<id>(kAXTrustedCheckOptionPrompt) : showDialog ? @YES : @NO};
+      @{(__bridge id)(kAXTrustedCheckOptionPrompt) : showDialog ? @YES : @NO};
   return AXIsProcessTrustedWithOptions(static_cast<CFDictionaryRef>(opts));
 }
 
@@ -155,7 +155,7 @@ static NSDictionary *getWindowInfo(CGWindowID windowID) {
   CFArrayRef windowList =
       CGWindowListCopyWindowInfo(listOptions, kCGNullWindowID);
 
-  for (NSDictionary *info in (NSArray *)windowList) {
+  for (NSDictionary *info in (__bridge NSArray *)windowList) {
     NSNumber *windowNumber = info[(id)kCGWindowNumber];
 
     if ([windowNumber intValue] == (int)windowID) {
@@ -259,7 +259,7 @@ static void hookProcFrontmostApplication(AXObserverRef observer,
 static void hookProcTargetWindow(AXObserverRef observer, AXUIElementRef element,
                                  CFStringRef cfNotificationType,
                                  void *contextData) {
-  NSString *notificationType = CFBridgingRelease(cfNotificationType);
+  NSString *notificationType = (__bridge NSString *)cfNotificationType;
   // NSLog(@"hookProcTargetWindow: processing for type %@", notificationType);
 
   // Handle move/resize events
@@ -497,7 +497,7 @@ static void checkAndHandleWindow(pid_t pid, AXUIElementRef frontmostWindow) {
  */
 static void waitUntilAccessibilityGranted() {
   NSString *trustedCheckOptionPromptKey =
-      static_cast<NSString *>(kAXTrustedCheckOptionPrompt);
+      (__bridge NSString *)(kAXTrustedCheckOptionPrompt);
   bool trusted = AXIsProcessTrustedWithOptions(static_cast<CFDictionaryRef>(
       @{trustedCheckOptionPromptKey : @YES}));
   // NSLog(@"waitUntilAccessibilityGranted: initial %d", trusted);
@@ -525,7 +525,7 @@ static void hookThread(void *_arg) {
 
 void ow_start_hook(char *target_window_title, void *overlay_window_id) {
   targetInfo.title = target_window_title;
-  NSView *overlayView = *static_cast<NSView **>(overlay_window_id);
+  NSView *overlayView = *(NSView * __weak *)(overlay_window_id);
   NSWindow *overlayWindow = [overlayView window];
   overlayInfo.window = overlayWindow;
 

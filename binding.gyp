@@ -43,6 +43,11 @@
               '-lpthread', '-framework AppKit', '-framework ApplicationServices'
             ]
           },
+          'xcode_settings': {
+            'OTHER_CFLAGS': [
+              '-fobjc-arc'
+            ]
+          },
           'cflags': ['-std=c99', '-pedantic', '-Wall', '-pthread'],
           'sources': [
             'src/lib/mac.mm',
