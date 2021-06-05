@@ -2,7 +2,7 @@ import { EventEmitter } from 'events'
 import { join } from 'path'
 import { throttle } from 'throttle-debounce'
 import { screen } from 'electron'
-import type { BrowserWindow, Rectangle, BrowserWindowConstructorOptions } from 'electron'
+import { BrowserWindow, Rectangle, BrowserWindowConstructorOptions } from 'electron'
 const lib: AddonExports = require('node-gyp-build')(join(__dirname, '..'))
 
 interface AddonExports {
@@ -45,6 +45,14 @@ export interface MoveresizeEvent {
   height: number
 }
 
+export interface AttachToOptions {
+  /**
+   * Whether the Window has a title bar. We adjust the overlay to not cover
+   * it
+   */
+  hasTitleBarOnMac?: boolean
+}
+
 declare interface OverlayWindow {
   on(event: 'attach', listener: (e: AttachEvent) => void): this
   on(event: 'focus', listener: () => void): this
@@ -60,6 +68,9 @@ class OverlayWindow extends EventEmitter {
   private _overlayWindow!: BrowserWindow
   public defaultBehavior = true
   private lastBounds: Rectangle = { x: 0, y: 0, width: 0, height: 0 }
+  /** The height of a title bar on a standard window. Only measured on Mac */
+  private macTitleBarHeight = 0
+  private attachToOptions: AttachToOptions = {}
 
   readonly WINDOW_OPTS: BrowserWindowConstructorOptions = {
     fullscreenable: true,
@@ -152,7 +163,7 @@ class OverlayWindow extends EventEmitter {
   }
 
   private updateOverlayBounds () {
-    let lastBounds = this.lastBounds
+    let lastBounds = this.adjustBoundsForMacTitleBar(this.lastBounds)
     if (lastBounds.width != 0 && lastBounds.height != 0) {
       if (process.platform === 'win32') {
         lastBounds = screen.screenToDipRect(this._overlayWindow, this.lastBounds)
@@ -190,6 +201,40 @@ class OverlayWindow extends EventEmitter {
     }
   }
 
+  /**
+   * Create a dummy window to calculate the title bar height on Mac. We use
+   * the title bar height to adjust the size of the overlay to not overlap
+   * the title bar. This helps Mac match the behaviour on Windows/Linux.
+   */
+  private async calculateMacTitleBarHeight() {
+    const testWindow = new BrowserWindow({
+      width: 400,
+      height: 300,
+      webPreferences: {
+        nodeIntegration: true
+      },
+      show: false,
+    })
+    const fullHeight = testWindow.getSize()[1]
+    const contentHeight = testWindow.getContentSize()[1]
+    this.macTitleBarHeight = fullHeight - contentHeight
+    testWindow.close()
+  }
+
+  /** If we're on a Mac, adjust the bounds to not overlap the title bar */
+  private adjustBoundsForMacTitleBar (bounds: Rectangle) {
+    if (!isMac || !this.attachToOptions.hasTitleBarOnMac) {
+      return bounds
+    }
+
+    const newBounds: Rectangle = {
+      ...bounds,
+      y: bounds.y + this.macTitleBarHeight,
+      height: bounds.height - this.macTitleBarHeight
+    }
+    return newBounds
+  }
+
   activateOverlay() {
     if (process.platform === 'win32') {
       // reason: - window lags a bit using .focus()
@@ -205,12 +250,16 @@ class OverlayWindow extends EventEmitter {
     lib.focusTarget()
   }
 
-  attachTo (overlayWindow: BrowserWindow, targetWindowTitle: string) {
+  attachTo (overlayWindow: BrowserWindow, targetWindowTitle: string, options: AttachToOptions = {}) {
     if (this._overlayWindow) {
       throw new Error('Library can be initialized only once.')
     }
     this._overlayWindow = overlayWindow
+    this.attachToOptions = options
     lib.start(overlayWindow.getNativeWindowHandle(), targetWindowTitle, this.handler.bind(this))
+    if (isMac) {
+      this.calculateMacTitleBarHeight()
+    }
   }
 }
 

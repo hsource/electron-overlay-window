@@ -60,7 +60,8 @@ function createWindow () {
 
   overlayWindow.attachTo(
     window,
-    process.platform === "darwin" ? "Untitled" : "Untitled - Notepad"
+    process.platform === "darwin" ? "Untitled" : "Untitled - Notepad",
+    { hasTitleBarOnMac: true }
   );
 }
 
